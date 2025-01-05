@@ -1,0 +1,1520 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+
+#Predicting Phishing URLs
+
+
+```{r}
+library(dplyr)
+library(reshape2)
+library(ggplot2)
+library(Boruta)
+library(caret)
+library(rpart)
+library(MLmetrics)
+library(pROC)
+
+```
+
+
+```{r}
+# Load the Dataset
+dataset <- read.csv("PhiUSIIL_Phishing_URL_Dataset.csv")
+ 
+# Display the first few rows of the dataset
+head(dataset)
+```
+```{r}
+library(summarytools)
+dfSummary(dataset)
+```
+
+
+
+```{r}
+# Identify duplicate rows
+duplicates <- duplicated(dataset)
+
+# View duplicate rows
+print(dim(dataset[duplicates, ]))
+```
+
+
+```{r}
+# Set a random seed for reproducibility
+set.seed(123) 
+
+# Filter rows with label = 0 and sample 5,000 rows
+subset_label_0 <- dataset[dataset$label == 0, ]
+sampled_label_0 <- subset_label_0[sample(nrow(subset_label_0), 5000), ]
+
+# Filter rows with label = 1 and sample 5,000 rows
+subset_label_1 <- dataset[dataset$label == 1, ]
+sampled_label_1 <- subset_label_1[sample(nrow(subset_label_1), 5000), ]
+
+# Combine the two samples
+dataset <- rbind(sampled_label_0, sampled_label_1)
+
+# Check the result
+print(dim(dataset))
+print(table(dataset$label))
+
+```
+
+```{r}
+head(dataset)
+```
+
+
+SHUFFLE
+```{r}
+dataset <- dataset[sample(nrow(dataset)), ]
+
+head(dataset)
+```
+
+```{r}
+# Drop the 'FILENAME' and 'URL' columns, since FILENAME is a unique identifier, and URL-derived features are present in dataset.
+library(dplyr)
+dataset <- dataset %>% select(-FILENAME, -URL, -Title, -Domain)
+
+# Check the structure of the updated dataset to ensure the columns are removed
+str(dataset)
+```
+
+
+0 -1 --> YES-NO(FACTOR)
+```{r}
+# Convert the 'label' column to a factor with levels 0 -> "NO" and 1 -> "YES"
+dataset$label <- factor(dataset$label, levels = c(0, 1), labels = c("NO", "YES"))
+
+# Check the structure of the dataset to confirm the change
+str(dataset)
+
+# Optionally, check the distribution of the labels
+table(dataset$label)
+```
+
+
+TLD TO NUMERIC(.com ->1, de ->2 , etc.)
+```{r}
+# Generate unique labels for TLD
+unique_tlds <- unique(dataset$TLD)  # Find unique TLDs
+tld_mapping <- setNames(seq_along(unique_tlds), unique_tlds)  # Create mapping
+
+# Apply label encoding
+dataset$TLD_label <- tld_mapping[dataset$TLD]
+
+# Print the updated dataset
+print(dataset)
+```
+
+DROP TLD
+
+```{r}
+dataset <- dataset %>% select(-TLD)
+
+```
+
+```{r}
+# Count unique values for each column
+unique_counts <- sapply(dataset, function(x) length(unique(x)))
+
+# View unique counts
+unique_counts
+```
+
+```{r}
+# Step 1: Outlier Detection and Visualization
+numeric_cols <- sapply(dataset, function(col) is.numeric(col) && length(unique(col)) > 2)
+numeric_dataset <- dataset[, numeric_cols]  # Subset numeric columns without binary variables
+
+# Create horizontal boxplot
+par(mfrow = c(3, 3))  # Layout for multiple plots (3x3 grid)
+for (col in colnames(numeric_dataset)) {
+  boxplot(numeric_dataset[[col]],
+          main = paste("Boxplot of", col),
+          col = "purple",
+          horizontal = TRUE,  # Horizontal boxplots
+          outline = TRUE)  # Show outliers
+}
+par(mfrow = c(1, 1))  # Reset layout
+```
+
+```{r}
+
+set.seed(123)
+# Total number of rows
+n <- nrow(dataset)
+
+# Calculate the number of rows for the training set (70%)
+train_size <- floor(0.7 * n)
+
+# Randomly shuffle row indices
+indices <- sample(1:n)
+
+# Split indices into train and test
+train_indices <- indices[1:train_size]
+test_indices <- indices[(train_size + 1):n]
+
+# Create training and testing sets
+train_data <- dataset[train_indices, ]
+test_data <- dataset[test_indices, ]
+
+# View train and test datasets
+print("Training Data:")
+print(train_data)
+
+print("Testing Data:")
+print(test_data)
+
+# Verify the sizes of the splits
+cat("Train size:", nrow(train_data), "\n")
+cat("Test size:", nrow(test_data), "\n")
+```
+
+
+
+```{r}
+train_data
+```
+
+COR MATRIX
+
+```{r}
+# Install required packages (if not already installed)
+if (!requireNamespace("reshape2", quietly = TRUE)) install.packages("reshape2")
+if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+
+# Load necessary libraries
+library(reshape2)
+library(ggplot2)
+library(stringr)
+
+# Wrap labels to a specified width
+
+# Calculate the Pearson correlation matrix
+# Exclude the 'label' column and select only numeric columns
+numeric_columns <- sapply(train_data, is.numeric)  # Identify numeric columns
+numeric_columns <- numeric_columns & names(train_data) != "label"  # Exclude 'label'
+
+# Compute the correlation matrix
+correlation_matrix <- cor(train_data[, numeric_columns], method = "pearson")
+
+# Convert the correlation matrix into a long format
+correlation_long <- melt(correlation_matrix)
+
+# Plot the heatmap
+heatmap_plot <- ggplot(correlation_long, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(
+    low = "blue", mid = "white", high = "red", midpoint = 0,
+    name = "Correlation"
+  ) +
+  labs(
+
+    x = "Variables",
+    y = "Variables"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 7),  # Rotate and adjust
+    axis.text.y = element_text(size = 6),  # Adjust y-axis text size
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+print(heatmap_plot)
+```
+
+```{r}
+# Find highly correlated columns
+high_corr_pairs <- which(abs(correlation_matrix) > 0.7, arr.ind = TRUE)
+
+# Filter out self-correlations (diagonal elements)
+high_corr_pairs <- high_corr_pairs[high_corr_pairs[, 1] != high_corr_pairs[, 2], ]
+```
+
+```{r}
+high_corr_pairs
+```
+
+```{r}
+# Convert factor label to numeric (0 = NO, 1 = YES)
+numeric_label <- as.numeric(train_data$label) - 1
+
+# Identify columns to drop
+features_to_drop_corr <- c()
+
+for (i in seq_len(nrow(high_corr_pairs))) {
+  feature1 <- colnames(correlation_matrix)[high_corr_pairs[i, 1]]
+  feature2 <- colnames(correlation_matrix)[high_corr_pairs[i, 2]]
+
+  # Compare correlation with target
+  corr_target_1 <- abs(cor(numeric_label, train_data[[feature1]]))
+  corr_target_2 <- abs(cor(numeric_label, train_data[[feature2]]))
+
+  # Drop the feature with lower correlation to the target
+  if (corr_target_1 < corr_target_2) {
+    features_to_drop_corr <- c(features_to_drop_corr, feature1)
+  } else {
+    features_to_drop_corr <- c(features_to_drop_corr, feature2)
+  }
+}
+
+# View features to drop
+print(features_to_drop_corr)
+
+```
+
+Extracting the unique features to drop:
+```{r}
+features_to_drop_corr <- unique(features_to_drop_corr)
+features_to_drop_corr
+```
+
+```{r}
+library(Boruta)
+# Assuming train_data is your dataset and "Target" is the dependent variable
+set.seed(123)  # For reproducibility
+
+# Apply Boruta
+boruta_result <- Boruta(label ~ ., data = train_data, doTrace = 2)
+
+# Print Boruta results
+print(boruta_result)
+
+# Plot the feature importance
+plot(boruta_result, las = 2, cex.axis = 0.7)
+```
+
+```{r}
+boruta_final <- TentativeRoughFix(boruta_result)
+features_selected_boruta <- getSelectedAttributes(boruta_final)
+```
+```{r}
+boruta_final
+```
+
+
+```{r}
+# Get attribute statistics
+boruta_stats <- attStats(boruta_final)
+
+# Extract features to drop (rejected features)
+features_to_drop_boruta <- rownames(boruta_stats[boruta_stats$decision == "Rejected", ])
+
+# View features to drop
+print(features_to_drop_boruta)
+```
+
+
+New datasets by feature selection methods:
+```{r}
+# Subset train_data and test_data to drop these features
+train_data_corr <- train_data[, !(names(train_data) %in% features_to_drop_corr)]
+test_data_corr <- test_data[, !(names(test_data) %in% features_to_drop_corr)]
+
+print(train_data_corr)
+print(test_data_corr)
+
+```
+```{r}
+dim(train_data_corr)
+```
+
+```{r}
+train_data_boruta <- train_data[, !(names(train_data) %in% features_to_drop_boruta)]
+test_data_boruta <- test_data[, !(names(test_data) %in% features_to_drop_boruta)]
+
+print(train_data_boruta)
+print(test_data_boruta)
+```
+
+
+```{r}
+train_data_cb <- train_data[, !(names(train_data) %in% features_to_drop_corr)]
+```
+
+```{r}
+dim(train_data_cb)
+```
+```{r}
+# Assuming train_data is your dataset and "Target" is the dependent variable
+set.seed(123)  # For reproducibility
+
+# Apply Boruta
+boruta_result2 <- Boruta(label ~ ., data = train_data_cb, doTrace = 2)
+
+# Print Boruta results
+print(boruta_result2)
+
+# Plot the feature importance
+plot(boruta_result2, las = 2, cex.axis = 0.7)
+
+```
+
+
+```{r}
+dim(train_data_cb)
+```
+
+```{r}
+
+boruta_final2 <- TentativeRoughFix(boruta_result2)
+features_selected_cb <- getSelectedAttributes(boruta_final2)
+
+```
+
+```{r}
+boruta_final2
+```
+
+```{r}
+boruta_stats2 <- attStats(boruta_final2)
+
+# Extract features to drop (rejected features)
+features_to_drop_cb <- rownames(boruta_stats2[boruta_stats2$decision == "Rejected", ])
+
+# View features to drop
+print(features_to_drop_cb)
+```
+
+```{r}
+train_data_cb <- train_data[, !(names(train_data) %in% features_to_drop_corr)]
+train_data_cb <- train_data_cb[, !(names(train_data_cb) %in% features_to_drop_cb)]
+test_data_cb <- test_data[, !(names(test_data) %in% features_to_drop_corr)]
+test_data_cb <- test_data_cb[, !(names(test_data_cb) %in% features_to_drop_cb)]
+
+print(train_data_cb)
+print(test_data_cb)
+```
+
+
+
+
+
+
+
+
+
+
+LOG REG
+```{r}
+set.seed(123)
+
+multiSummary <- function(data, lev = NULL, model = NULL) {
+    # Calculate accuracy
+    acc <- sum(data$pred == data$obs) / nrow(data)
+    
+    # Calculate precision and recall
+    precision <- posPredValue(data$pred, data$obs, positive = lev[2])
+    recall <- sensitivity(data$pred, data$obs, positive = lev[2])
+    
+    # Calculate F1 score
+    f1 <- (2 * precision * recall) / (precision + recall)
+    
+    # Calculate ROC AUC
+    roc_auc <- pROC::roc(as.numeric(data$obs), as.numeric(data$pred))$auc
+    
+    # Return all metrics as a named vector
+    c(Accuracy = acc, F1 = f1, ROC = roc_auc)
+}
+cv_control <- trainControl(
+    method = "cv",                # Cross-validation
+    number = 10,                  # 10 folds
+    classProbs = TRUE,            # Required for ROC and AUC
+    summaryFunction = multiSummary,  # Custom summary function for multiple metrics
+    verboseIter = TRUE,           # Print progress
+    savePredictions = "final"     # Save predictions for custom metrics
+)
+
+# Custom summary function to include F1 score, Accuracy, and ROC
+
+
+# Train the logistic regression model
+set.seed(42)
+logistic_model1 <- train(
+    label ~ .,                    # Formula (label ~ predictors)
+    data = train_data_boruta,     # Training dataset
+    method = "glm",               # Logistic regression
+    family = "binomial",          # Specify logistic regression
+    trControl = cv_control,       # Cross-validation settings
+    metric = "ROC"                # Optimize based on ROC AUC
+)
+
+# View the results
+print(logistic_model1)
+```
+
+
+
+
+```{r}
+predictions1 <- predict(logistic_model1, newdata = test_data_boruta)
+
+# Compute F1, ROC AUC, and Accuracy
+f1 <- F1_Score(y_pred = predictions1, y_true = test_data_boruta$label)
+roc_auc <- roc(as.numeric(test_data_boruta$label), as.numeric(predictions1))$auc
+accuracy <- Accuracy(y_pred = predictions1, y_true = test_data_boruta$label)
+
+# Print evaluation metrics
+cat("F1-Score: ", f1, "\n")
+cat("ROC AUC: ", roc_auc, "\n")
+cat("Accuracy: ", accuracy, "\n")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# Custom summary function to calculate Accuracy, F1 score, and ROC AUC
+multiSummary <- function(data, lev = NULL, model = NULL) {
+    # Calculate accuracy
+    acc <- sum(data$pred == data$obs) / nrow(data)
+    
+    # Calculate precision and recall
+    precision <- posPredValue(data$pred, data$obs, positive = lev[2])
+    recall <- sensitivity(data$pred, data$obs, positive = lev[2])
+    
+    # Calculate F1 score
+    f1 <- (2 * precision * recall) / (precision + recall)
+    
+    # Calculate ROC AUC
+    roc_auc <- pROC::roc(as.numeric(data$obs), as.numeric(data$pred))$auc
+    
+    # Return all metrics as a named vector
+    c(Accuracy = acc, F1 = f1, ROC = roc_auc)
+}
+
+# Update trainControl to use the custom summary function
+set.seed(123)
+cv_control <- trainControl(
+        method = "cv",                # Cross-validation
+        number = 10,                  # 10 folds
+        classProbs = TRUE,            # Required for ROC and AUC
+        summaryFunction = multiSummary,  # Use custom summary function
+        verboseIter = TRUE            # Print progress
+)
+
+# Train logistic regression model
+set.seed(42)  # For reproducibility
+logistic_model2 <- train(
+        label ~ .,                    # Formula (label ~ predictors)
+        data = train_data_corr,       # Training dataset (after correlation-based feature selection)
+        method = "glm",               # Logistic regression
+        family = "binomial",          # Specify logistic regression
+        trControl = cv_control,       # Cross-validation settings
+        metric = "ROC"                # Optimize based on ROC AUC
+)
+
+# View model results
+print(logistic_model2)
+```
+
+```{r}
+predictions2 <- predict(logistic_model2, newdata = test_data_corr)
+
+# Compute F1, ROC AUC, and Accuracy
+f1 <- F1_Score(y_pred = predictions2, y_true = test_data_corr$label)
+roc_auc <- roc(as.numeric(test_data_corr$label), as.numeric(predictions2))$auc
+accuracy <- Accuracy(y_pred = predictions2, y_true =test_data_corr$label)
+
+# Print evaluation metrics
+cat("F1-Score: ", f1, "\n")
+cat("ROC AUC: ", roc_auc, "\n")
+cat("Accuracy: ", accuracy, "\n")
+```
+
+
+```{r}
+# Custom summary function to calculate Accuracy, F1 score, and ROC AUC
+multiSummary <- function(data, lev = NULL, model = NULL) {
+    # Calculate accuracy
+    acc <- sum(data$pred == data$obs) / nrow(data)
+    
+    # Calculate precision and recall
+    precision <- posPredValue(data$pred, data$obs, positive = lev[2])
+    recall <- sensitivity(data$pred, data$obs, positive = lev[2])
+    
+    # Calculate F1 score
+    f1 <- (2 * precision * recall) / (precision + recall)
+    
+    # Calculate ROC AUC
+    roc_auc <- pROC::roc(as.numeric(data$obs), as.numeric(data$pred))$auc
+    
+    # Return all metrics as a named vector
+    c(Accuracy = acc, F1 = f1, ROC = roc_auc)
+}
+
+# Update trainControl to use the custom summary function
+set.seed(123)
+cv_control <- trainControl(
+        method = "cv",                # Cross-validation
+        number = 10,                  # 10 folds
+        classProbs = TRUE,            # Required for ROC and AUC
+        summaryFunction = multiSummary,  # Use custom summary function
+        verboseIter = TRUE            # Print progress
+)
+
+# Train logistic regression model
+set.seed(42)  # For reproducibility
+logistic_model3 <- train(
+        label ~ .,                    # Formula (label ~ predictors)
+        data = train_data_cb,       # Training dataset (after correlation-based feature selection)
+        method = "glm",               # Logistic regression
+        family = "binomial",          # Specify logistic regression
+        trControl = cv_control,       # Cross-validation settings
+        metric = "ROC"                # Optimize based on ROC AUC
+)
+
+# View model results
+print(logistic_model3)
+```
+
+```{r}
+predictions3 <- predict(logistic_model3, newdata = test_data_cb)
+
+# Compute F1, ROC AUC, and Accuracy
+f1 <- F1_Score(y_pred = predictions3, y_true = test_data_cb$label)
+roc_auc <- roc(as.numeric(test_data_cb$label), as.numeric(predictions3))$auc
+accuracy <- Accuracy(y_pred = predictions3, y_true =test_data_cb$label)
+
+# Print evaluation metrics
+cat("F1-Score: ", f1, "\n")
+cat("ROC AUC: ", roc_auc, "\n")
+cat("Accuracy: ", accuracy, "\n")
+```
+```{r}
+install.packages1
+```
+
+
+#SVM
+```{r}
+# Load necessary libraries
+library(caret)
+library(e1071)  # For SVM
+library(pROC)   # For ROC and AUC calculations
+
+# Custom summary function to calculate Accuracy, F1 score, and ROC AUC
+multiSummary <- function(data, lev = NULL, model = NULL) {
+    # Calculate accuracy
+    acc <- sum(data$pred == data$obs) / nrow(data)
+    
+    # Calculate precision and recall
+    precision <- posPredValue(data$pred, data$obs, positive = lev[2])
+    recall <- sensitivity(data$pred, data$obs, positive = lev[2])
+    
+    # Calculate F1 score
+    f1 <- (2 * precision * recall) / (precision + recall)
+    
+    # Calculate ROC AUC
+    roc_curve <- roc(response = data$obs, predictor = as.numeric(data$pred == lev[2]))
+    roc_auc <- auc(roc_curve)
+    
+    # Return all metrics as a named vector
+    c(Accuracy = acc, F1 = f1, ROC = roc_auc)
+}
+
+# Define trainControl with the custom summary function
+set.seed(123)
+cv_control <- trainControl(
+  method = "cv",                 # Cross-validation
+  number = 10,                   # 10 folds
+  classProbs = TRUE,             # Enable class probabilities
+  summaryFunction = multiSummary, # Use custom summary function
+  verboseIter = TRUE,            # Print progress
+  savePredictions = "final"      # Save predictions for evaluation
+)
+
+# Train SVM model
+set.seed(42)  # For reproducibility
+svm_model <- train(
+  label ~ .,                     # Formula: target ~ predictors
+  data = train_data_boruta,      # Training dataset
+  method = "svmRadial",          # Radial kernel SVM
+  trControl = cv_control,        # Cross-validation settings
+  metric = "ROC",                # Optimize based on ROC AUC
+  tuneLength = 10                # Explore 10 hyperparameter combinations
+)
+
+# View the model results
+print(svm_model)
+
+```
+
+
+```{r}
+# Load necessary libraries
+library(pROC)
+library(MLmetrics)
+
+# Check class levels in the dataset
+print(levels(test_data_boruta$label))  # Ensure you know the correct positive class
+
+# Predict on test_data_boruta
+svm_predictions <- predict(svm_model, newdata = test_data_boruta)  # Class predictions
+svm_probs <- predict(svm_model, newdata = test_data_boruta, type = "prob")  # Probabilities for ROC AUC
+
+# Adjust the positive class based on your dataset (e.g., replace "YES" with the actual positive class)
+positive_class <- levels(test_data_boruta$label)[2]  # Assuming the second level is the positive class
+
+# Compute F1-Score
+f1 <- F1_Score(y_pred = svm_predictions, y_true = test_data_boruta$label, positive = positive_class)
+
+# Compute ROC AUC
+roc_curve <- roc(response = test_data_boruta$label, predictor = svm_probs[, positive_class])
+roc_auc <- auc(roc_curve)
+
+# Compute Accuracy
+accuracy <- Accuracy(y_pred = svm_predictions, y_true = test_data_boruta$label)
+
+# Print evaluation metrics
+cat("F1-Score: ", f1, "\n")
+cat("ROC AUC: ", roc_auc, "\n")
+cat("Accuracy: ", accuracy, "\n")
+
+```
+
+
+
+```{r}
+# Load necessary libraries
+library(caret)
+library(e1071)  # For SVM
+library(pROC)   # For ROC and AUC calculations
+
+# Custom summary function to calculate Accuracy, F1 score, and ROC AUC
+multiSummary <- function(data, lev = NULL, model = NULL) {
+    # Calculate accuracy
+    acc <- sum(data$pred == data$obs) / nrow(data)
+    
+    # Calculate precision and recall
+    precision <- posPredValue(data$pred, data$obs, positive = lev[2])
+    recall <- sensitivity(data$pred, data$obs, positive = lev[2])
+    
+    # Calculate F1 score
+    f1 <- (2 * precision * recall) / (precision + recall)
+    
+    # Calculate ROC AUC
+    roc_curve <- roc(response = data$obs, predictor = as.numeric(data$pred == lev[2]))
+    roc_auc <- auc(roc_curve)
+    
+    # Return all metrics as a named vector
+    c(Accuracy = acc, F1 = f1, ROC = roc_auc)
+}
+
+# Define trainControl with the custom summary function
+set.seed(123)
+cv_control <- trainControl(
+  method = "cv",                 # Cross-validation
+  number = 10,                   # 10 folds
+  classProbs = TRUE,             # Enable class probabilities
+  summaryFunction = multiSummary, # Use custom summary function
+  verboseIter = TRUE,            # Print progress
+  savePredictions = "final"      # Save predictions for evaluation
+)
+
+# Train SVM model on train_data_corr
+set.seed(42)  # For reproducibility
+svm_model_corr <- train(
+  label ~ .,                     # Formula: target ~ predictors
+  data = train_data_corr,        # Training dataset (correlation-based feature selection)
+  method = "svmRadial",          # Radial kernel SVM
+  trControl = cv_control,        # Cross-validation settings
+  metric = "ROC",                # Optimize based on ROC AUC
+  tuneLength = 10                # Explore 10 hyperparameter combinations
+)
+
+# View the model results
+print(svm_model_corr)
+
+```
+
+
+```{r}
+# Load necessary libraries
+library(pROC)
+library(MLmetrics)
+
+# Check class levels in the dataset
+print(levels(test_data_corr$label))  # Ensure you know the correct positive class
+
+# Predict on test_data_corr
+svm_predictions_corr_test <- predict(svm_model_corr, newdata = test_data_corr)  # Class predictions
+svm_probs_corr_test <- predict(svm_model_corr, newdata = test_data_corr, type = "prob")  # Probabilities for ROC AUC
+
+# Adjust the positive class based on your dataset (e.g., replace "YES" with the actual positive class)
+positive_class_corr_test <- levels(test_data_corr$label)[2]  # Assuming the second level is the positive class
+
+# Compute F1-Score
+f1_corr_test <- F1_Score(y_pred = svm_predictions_corr_test, y_true = test_data_corr$label, positive = positive_class_corr_test)
+
+# Compute ROC AUC
+roc_curve_corr_test <- roc(response = test_data_corr$label, predictor = svm_probs_corr_test[, positive_class_corr_test])
+roc_auc_corr_test <- auc(roc_curve_corr_test)
+
+# Compute Accuracy
+accuracy_corr_test <- Accuracy(y_pred = svm_predictions_corr_test, y_true = test_data_corr$label)
+
+# Print evaluation metrics
+cat("F1-Score (Test Data): ", f1_corr_test, "\n")
+cat("ROC AUC (Test Data): ", roc_auc_corr_test, "\n")
+cat("Accuracy (Test Data): ", accuracy_corr_test, "\n")
+
+
+```
+
+```{r}
+# Load necessary libraries
+library(caret)
+library(e1071)  # For SVM
+library(pROC)   # For ROC and AUC calculations
+
+# Custom summary function to calculate Accuracy, F1 score, and ROC AUC
+multiSummary <- function(data, lev = NULL, model = NULL) {
+    # Calculate accuracy
+    acc <- sum(data$pred == data$obs) / nrow(data)
+    
+    # Calculate precision and recall
+    precision <- posPredValue(data$pred, data$obs, positive = lev[2])
+    recall <- sensitivity(data$pred, data$obs, positive = lev[2])
+    
+    # Calculate F1 score
+    f1 <- (2 * precision * recall) / (precision + recall)
+    
+    # Calculate ROC AUC
+    roc_curve <- roc(response = data$obs, predictor = as.numeric(data$pred == lev[2]))
+    roc_auc <- auc(roc_curve)
+    
+    # Return all metrics as a named vector
+    c(Accuracy = acc, F1 = f1, ROC = roc_auc)
+}
+
+# Define trainControl with the custom summary function
+set.seed(123)
+cv_control <- trainControl(
+  method = "cv",                 # Cross-validation
+  number = 10,                   # 10 folds
+  classProbs = TRUE,             # Enable class probabilities
+  summaryFunction = multiSummary, # Use custom summary function
+  verboseIter = TRUE,            # Print progress
+  savePredictions = "final"      # Save predictions for evaluation
+)
+
+# Train SVM model on train_data_cb
+set.seed(42)  # For reproducibility
+svm_model_cb <- train(
+  label ~ .,                     # Formula: target ~ predictors
+  data = train_data_cb,          # Training dataset (combined feature selection)
+  method = "svmRadial",          # Radial kernel SVM
+  trControl = cv_control,        # Cross-validation settings
+  metric = "ROC",                # Optimize based on ROC AUC
+  tuneLength = 10                # Explore 10 hyperparameter combinations
+)
+
+# View the model results
+print(svm_model_cb)
+
+```
+
+```{r}
+library(pROC)
+library(MLmetrics)
+
+# Check class levels in the dataset
+print(levels(test_data_cb$label))  # Ensure you know the correct positive class
+
+# Predict on test_data_cb
+svm_predictions_cb_test <- predict(svm_model_cb, newdata = test_data_cb)  # Class predictions
+svm_probs_cb_test <- predict(svm_model_cb, newdata = test_data_cb, type = "prob")  # Probabilities for ROC AUC
+
+# Adjust the positive class based on your dataset (e.g., replace "YES" with the actual positive class)
+positive_class_cb_test <- levels(test_data_cb$label)[2]  # Assuming the second level is the positive class
+
+# Compute F1-Score
+f1_cb_test <- F1_Score(y_pred = svm_predictions_cb_test, y_true = test_data_cb$label, positive = positive_class_cb_test)
+
+# Compute ROC AUC
+roc_curve_cb_test <- roc(response = test_data_cb$label, predictor = svm_probs_cb_test[, positive_class_cb_test])
+roc_auc_cb_test <- auc(roc_curve_cb_test)
+
+# Compute Accuracy
+accuracy_cb_test <- Accuracy(y_pred = svm_predictions_cb_test, y_true = test_data_cb$label)
+
+# Print evaluation metrics
+cat("F1-Score (Test Data CB): ", f1_cb_test, "\n")
+cat("ROC AUC (Test Data CB): ", roc_auc_cb_test, "\n")
+cat("Accuracy (Test Data CB): ", accuracy_cb_test, "\n")
+
+```
+
+
+
+#DECISION TREE
+
+```{r}
+# Load necessary libraries
+library(caret)
+library(rpart)
+
+# Define the control for cross-validation
+set.seed(123) # Set seed for reproducibility
+train_control <- trainControl(
+  method = "cv",                 # Cross-validation
+  number = 10,                   # 10-fold cross-validation
+  classProbs = TRUE,             # Enable class probabilities
+  summaryFunction = twoClassSummary, # Use ROC-based metrics
+  verboseIter = TRUE,            # Display training progress
+  savePredictions = "final"      # Save predictions for metrics calculation
+)
+
+# Train the decision tree model
+dt_model <- train(
+  label ~ .,                     # Formula: target ~ predictors
+  data = train_data_boruta,      # Dataset with Boruta-selected features
+  method = "rpart",              # Decision tree method
+  trControl = train_control,     # Cross-validation settings
+  tuneLength = 10,              
+  metric = "ROC"                 # Optimize based on ROC AUC
+)
+
+# View the results
+print(dt_model)
+
+# Calculate Training Metrics (F1, Accuracy, ROC)
+# Extract predictions and observed values
+predictions <- dt_model$pred$pred
+observed <- dt_model$pred$obs
+
+# Confusion matrix for Accuracy and F1
+conf_matrix <- confusionMatrix(predictions, observed, positive = levels(observed)[2])
+
+# Accuracy
+accuracy <- conf_matrix$overall["Accuracy"]
+
+# Precision and Recall
+precision <- conf_matrix$byClass["Pos Pred Value"] # Positive Predictive Value
+recall <- conf_matrix$byClass["Sensitivity"]       # True Positive Rate
+
+# F1 Score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+
+# ROC AUC
+library(pROC)
+roc_curve <- roc(observed, dt_model$pred[, levels(observed)[2]])
+roc_auc <- auc(roc_curve)
+
+# Print Training Metrics
+cat("Training Metrics:\n")
+cat("Accuracy:", accuracy, "\n")
+cat("F1 Score:", f1_score, "\n")
+cat("ROC AUC:", roc_auc, "\n")
+
+
+```
+
+
+
+```{r}
+# Predict on the test set
+predictions <- predict(dt_model, test_data_boruta)
+probs <- predict(dt_model, test_data_boruta, type = "prob") # For ROC AUC
+
+# Compute confusion matrix
+conf_matrix <- confusionMatrix(predictions, test_data_boruta$label)
+print(conf_matrix)
+
+# Extract metrics
+accuracy <- conf_matrix$overall["Accuracy"]
+precision <- conf_matrix$byClass["Pos Pred Value"]
+recall <- conf_matrix$byClass["Sensitivity"]
+f1 <- 2 * ((precision * recall) / (precision + recall))
+
+# Print metrics
+cat("Accuracy:", accuracy, "\n")
+cat("Precision:", precision, "\n")
+cat("Recall:", recall, "\n")
+cat("F1 Score:", f1, "\n")
+```
+
+```{r}
+roc_curve <- roc(
+  response = test_data_boruta$label,  # True labels
+  predictor = probs[, levels(test_data_boruta$label)[2]]  # Probabilities for the positive class
+)
+roc_auc <- auc(roc_curve)
+cat("ROC AUC:", roc_auc, "\n")
+```
+
+
+
+
+```{r}
+# Load necessary libraries
+library(caret)
+library(rpart)
+
+# Define the control for cross-validation
+set.seed(123) # Set seed for reproducibility
+train_control <- trainControl(
+  method = "cv",                 # Cross-validation
+  number = 10,                   # 10-fold cross-validation
+  classProbs = TRUE,             # Enable class probabilities
+  summaryFunction = twoClassSummary, # Use ROC-based metrics
+  verboseIter = TRUE,            # Display training progress
+  savePredictions = "final"      # Save predictions for metrics calculation
+)
+
+# Train the decision tree model
+dt_model2 <- train(
+  label ~ .,                     # Formula: target ~ predictors
+  data = train_data_corr,      # Dataset with Boruta-selected features
+  method = "rpart",              # Decision tree method
+  trControl = train_control,     # Cross-validation settings
+  tuneLength = 10,              
+  metric = "ROC"                 # Optimize based on ROC AUC
+)
+
+# View the results
+print(dt_model2)
+
+# Calculate Training Metrics (F1, Accuracy, ROC)
+# Extract predictions and observed values
+predictions <- dt_model2$pred$pred
+observed <- dt_model2$pred$obs
+
+# Confusion matrix for Accuracy and F1
+conf_matrix <- confusionMatrix(predictions, observed, positive = levels(observed)[2])
+
+# Accuracy
+accuracy <- conf_matrix$overall["Accuracy"]
+
+# Precision and Recall
+precision <- conf_matrix$byClass["Pos Pred Value"] # Positive Predictive Value
+recall <- conf_matrix$byClass["Sensitivity"]       # True Positive Rate
+
+# F1 Score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+
+# ROC AUC
+library(pROC)
+roc_curve <- roc(observed, dt_model2$pred[, levels(observed)[2]])
+roc_auc <- auc(roc_curve)
+
+# Print Training Metrics
+cat("Training Metrics:\n")
+cat("Accuracy:", accuracy, "\n")
+cat("F1 Score:", f1_score, "\n")
+cat("ROC AUC:", roc_auc, "\n")
+```
+
+
+```{r}
+# Predict on the test set
+predictions <- predict(dt_model2, test_data_corr)
+probs <- predict(dt_model2, test_data_corr, type = "prob") # For ROC AUC
+
+# Compute confusion matrix
+conf_matrix <- confusionMatrix(predictions, test_data_corr$label)
+print(conf_matrix)
+
+# Extract metrics
+accuracy <- conf_matrix$overall["Accuracy"]
+precision <- conf_matrix$byClass["Pos Pred Value"]
+recall <- conf_matrix$byClass["Sensitivity"]
+f1 <- 2 * ((precision * recall) / (precision + recall))
+
+# Print metrics
+cat("Accuracy:", accuracy, "\n")
+cat("Precision:", precision, "\n")
+cat("Recall:", recall, "\n")
+cat("F1 Score:", f1, "\n")
+```
+
+```{r}
+roc_curve <- roc(
+  response = test_data_corr$label,  # True labels
+  predictor = probs[, levels(test_data_corr$label)[2]]  # Probabilities for the positive class
+)
+roc_auc <- auc(roc_curve)
+cat("ROC AUC:", roc_auc, "\n")
+```
+
+
+
+
+
+
+```{r}
+# Load necessary libraries
+library(caret)
+library(rpart)
+
+# Define the control for cross-validation
+set.seed(123) # Set seed for reproducibility
+train_control <- trainControl(
+  method = "cv",                 # Cross-validation
+  number = 10,                   # 10-fold cross-validation
+  classProbs = TRUE,             # Enable class probabilities
+  summaryFunction = twoClassSummary, # Use ROC-based metrics
+  verboseIter = TRUE,            # Display training progress
+  savePredictions = "final"      # Save predictions for metrics calculation
+)
+
+# Train the decision tree model
+dt_model3 <- train(
+  label ~ .,                     # Formula: target ~ predictors
+  data = train_data_cb,      
+  method = "rpart",              # Decision tree method
+  trControl = train_control,     # Cross-validation settings
+  tuneLength = 10,              
+  metric = "ROC"                 # Optimize based on ROC AUC
+)
+
+# View the results
+print(dt_model3)
+
+# Calculate Training Metrics (F1, Accuracy, ROC)
+# Extract predictions and observed values
+predictions <- dt_model3$pred$pred
+observed <- dt_model3$pred$obs
+
+# Confusion matrix for Accuracy and F1
+conf_matrix <- confusionMatrix(predictions, observed, positive = levels(observed)[2])
+
+# Accuracy
+accuracy <- conf_matrix$overall["Accuracy"]
+
+# Precision and Recall
+precision <- conf_matrix$byClass["Pos Pred Value"] # Positive Predictive Value
+recall <- conf_matrix$byClass["Sensitivity"]       # True Positive Rate
+
+# F1 Score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+
+# ROC AUC
+library(pROC)
+roc_curve <- roc(observed, dt_model3$pred[, levels(observed)[2]])
+roc_auc <- auc(roc_curve)
+
+# Print Training Metrics
+cat("Training Metrics:\n")
+cat("Accuracy:", accuracy, "\n")
+cat("F1 Score:", f1_score, "\n")
+cat("ROC AUC:", roc_auc, "\n")
+```
+
+```{r}
+# Predict on the test set
+predictions <- predict(dt_model3, test_data_cb)
+probs <- predict(dt_model3, test_data_cb, type = "prob") # For ROC AUC
+
+# Compute confusion matrix
+conf_matrix <- confusionMatrix(predictions, test_data_cb$label)
+print(conf_matrix)
+
+# Extract metrics
+accuracy <- conf_matrix$overall["Accuracy"]
+precision <- conf_matrix$byClass["Pos Pred Value"]
+recall <- conf_matrix$byClass["Sensitivity"]
+f1 <- 2 * ((precision * recall) / (precision + recall))
+
+# Print metrics
+cat("Accuracy:", accuracy, "\n")
+cat("Precision:", precision, "\n")
+cat("Recall:", recall, "\n")
+cat("F1 Score:", f1, "\n")
+```
+
+```{r}
+roc_curve <- roc(
+  response = test_data_cb$label,  # True labels
+  predictor = probs[, levels(test_data_cb$label)[2]]  # Probabilities for the positive class
+)
+roc_auc <- auc(roc_curve)
+cat("ROC AUC:", roc_auc, "\n")
+```
+
+
+
+
+
+#Random Forest
+```{r}
+install.packages("randomForest")
+
+```
+
+
+
+
+
+```{r}
+library(caret)
+library(randomForest)
+library(pROC)  # For ROC and AUC calculations
+library(MLmetrics)  # For F1 Score and Accuracy
+
+# Define custom summary function to compute Accuracy, F1 Score, and ROC AUC
+multiSummary <- function(data, lev = NULL, model = NULL) {
+    # Calculate accuracy
+    acc <- sum(data$pred == data$obs) / nrow(data)
+    
+    # Calculate precision and recall
+    precision <- posPredValue(data$pred, data$obs, positive = lev[2])
+    recall <- sensitivity(data$pred, data$obs, positive = lev[2])
+    
+    # Calculate F1 score
+    f1 <- (2 * precision * recall) / (precision + recall)
+    
+    # Calculate ROC AUC
+    roc_curve <- roc(response = data$obs, predictor = as.numeric(data$pred == lev[2]))
+    roc_auc <- auc(roc_curve)
+    
+    # Return all metrics as a named vector
+    c(Accuracy = acc, F1 = f1, ROC = roc_auc)
+}
+
+# Define cross-validation control
+set.seed(123) # For reproducibility
+train_control <- trainControl(
+  method = "cv",                 # Cross-validation
+  number = 10,                   # 10-fold CV
+  verboseIter = TRUE,            # Print progress
+  classProbs = TRUE,             # Needed for ROC AUC
+  summaryFunction = multiSummary, # Use custom summary function
+  savePredictions = "final"      # Save predictions for evaluation
+)
+
+# Train the Random Forest model
+set.seed(42)  # For reproducibility
+rf_model <- train(
+  label ~ .,                    # Formula: target ~ predictors
+  data = train_data_boruta,       # Training dataset
+  method = "rf",                # Random Forest method
+  trControl = train_control,    # Cross-validation settings
+  tuneLength = 5,               # Try 5 different hyperparameter values
+  metric = "ROC"                # Optimize based on ROC AUC
+)
+
+# View model summary
+print(rf_model)
+
+# Plot variable importance
+varImpPlot(rf_model$finalModel)
+
+```
+
+```{r}
+library(pROC)
+
+# Predict on test_data_boruta
+rf_predictions_boruta <- predict(rf_model, test_data_boruta)  # Class predictions
+rf_probs_boruta <- predict(rf_model, test_data_boruta, type = "prob")  # Probabilities for ROC AUC
+
+# Compute confusion matrix
+rf_conf_matrix_boruta <- confusionMatrix(rf_predictions_boruta, test_data_boruta$label)
+print(rf_conf_matrix_boruta)
+
+# Extract metrics from the confusion matrix
+rf_accuracy_boruta <- rf_conf_matrix_boruta$overall["Accuracy"]  # Accuracy
+rf_precision_boruta <- rf_conf_matrix_boruta$byClass["Pos Pred Value"]  # Precision
+rf_recall_boruta <- rf_conf_matrix_boruta$byClass["Sensitivity"]  # Recall
+
+# Compute F1 Score
+rf_f1_boruta <- 2 * ((rf_precision_boruta * rf_recall_boruta) / (rf_precision_boruta + rf_recall_boruta))
+
+# Compute ROC AUC
+positive_class_boruta <- levels(test_data_boruta$label)[2]  # Dynamically detect the positive class
+roc_curve_boruta <- roc(response = test_data_boruta$label, predictor = rf_probs_boruta[, positive_class_boruta])
+rf_roc_auc_boruta <- auc(roc_curve_boruta)
+
+# Print metrics
+cat("Accuracy (Test Data Boruta):", rf_accuracy_boruta, "\n")
+cat("F1 Score (Test Data Boruta):", rf_f1_boruta, "\n")
+cat("ROC AUC (Test Data Boruta):", rf_roc_auc_boruta, "\n")
+
+```
+
+
+
+```{r}
+library(caret)
+library(randomForest)
+library(pROC)  # For ROC and AUC calculations
+library(MLmetrics)  # For F1 Score and Accuracy
+
+# Define custom summary function to compute Accuracy, F1 Score, and ROC AUC
+multiSummary <- function(data, lev = NULL, model = NULL) {
+    # Calculate accuracy
+    acc <- sum(data$pred == data$obs) / nrow(data)
+    
+    # Calculate precision and recall
+    precision <- posPredValue(data$pred, data$obs, positive = lev[2])
+    recall <- sensitivity(data$pred, data$obs, positive = lev[2])
+    
+    # Calculate F1 score
+    f1 <- (2 * precision * recall) / (precision + recall)
+    
+    # Calculate ROC AUC
+    roc_curve <- roc(response = data$obs, predictor = as.numeric(data$pred == lev[2]))
+    roc_auc <- auc(roc_curve)
+    
+    # Return all metrics as a named vector
+    c(Accuracy = acc, F1 = f1, ROC = roc_auc)
+}
+
+# Define cross-validation control
+set.seed(123) # For reproducibility
+train_control <- trainControl(
+  method = "cv",                 # Cross-validation
+  number = 10,                   # 10-fold CV
+  verboseIter = TRUE,            # Print progress
+  classProbs = TRUE,             # Needed for ROC AUC
+  summaryFunction = multiSummary, # Use custom summary function
+  savePredictions = "final"      # Save predictions for evaluation
+)
+
+# Train the Random Forest model
+set.seed(42)  # For reproducibility
+rf_model <- train(
+  label ~ .,                    # Formula: target ~ predictors
+  data = train_data_corr,       # Training dataset
+  method = "rf",                # Random Forest method
+  trControl = train_control,    # Cross-validation settings
+  tuneLength = 5,               # Try 5 different hyperparameter values
+  metric = "ROC"                # Optimize based on ROC AUC
+)
+
+# View model summary
+print(rf_model)
+
+# Plot variable importance
+varImpPlot(rf_model$finalModel)
+
+```
+
+
+
+```{r}
+library(pROC)
+
+# Predict on test_data_corr
+rf_predictions <- predict(rf_model, test_data_corr)  # Class predictions
+rf_probs <- predict(rf_model, test_data_corr, type = "prob")  # Probabilities for ROC AUC
+
+# Compute confusion matrix
+rf_conf_matrix <- confusionMatrix(rf_predictions, test_data_corr$label)
+print(rf_conf_matrix)
+
+# Extract metrics from the confusion matrix
+rf_accuracy <- rf_conf_matrix$overall["Accuracy"]  # Accuracy
+rf_precision <- rf_conf_matrix$byClass["Pos Pred Value"]  # Precision
+rf_recall <- rf_conf_matrix$byClass["Sensitivity"]  # Recall
+
+# Compute F1 Score
+rf_f1 <- 2 * ((rf_precision * rf_recall) / (rf_precision + rf_recall))
+
+# Compute ROC AUC
+positive_class <- levels(test_data_corr$label)[2]  # Dynamically detect the positive class
+roc_curve <- roc(response = test_data_corr$label, predictor = rf_probs[, positive_class])
+rf_roc_auc <- auc(roc_curve)
+
+# Print metrics
+cat("Accuracy:", rf_accuracy, "\n")
+cat("F1 Score:", rf_f1, "\n")
+cat("ROC AUC:", rf_roc_auc, "\n")
+
+```
+
+
+
+
+
+
+```{r}
+library(caret)
+library(randomForest)
+library(pROC)  # For ROC and AUC calculations
+library(MLmetrics)  # For F1 Score and Accuracy
+
+# Define custom summary function to compute Accuracy, F1 Score, and ROC AUC
+multiSummary <- function(data, lev = NULL, model = NULL) {
+    # Calculate accuracy
+    acc <- sum(data$pred == data$obs) / nrow(data)
+    
+    # Calculate precision and recall
+    precision <- posPredValue(data$pred, data$obs, positive = lev[2])
+    recall <- sensitivity(data$pred, data$obs, positive = lev[2])
+    
+    # Calculate F1 score
+    f1 <- (2 * precision * recall) / (precision + recall)
+    
+    # Calculate ROC AUC
+    roc_curve <- roc(response = data$obs, predictor = as.numeric(data$pred == lev[2]))
+    roc_auc <- auc(roc_curve)
+    
+    # Return all metrics as a named vector
+    c(Accuracy = acc, F1 = f1, ROC = roc_auc)
+}
+
+# Define cross-validation control
+set.seed(123) # For reproducibility
+train_control <- trainControl(
+  method = "cv",                 # Cross-validation
+  number = 10,                   # 10-fold CV
+  verboseIter = TRUE,            # Print progress
+  classProbs = TRUE,             # Needed for ROC AUC
+  summaryFunction = multiSummary, # Use custom summary function
+  savePredictions = "final"      # Save predictions for evaluation
+)
+
+# Train the Random Forest model
+set.seed(42)  # For reproducibility
+rf_model <- train(
+  label ~ .,                    # Formula: target ~ predictors
+  data = train_data_cb,       # Training dataset
+  method = "rf",                # Random Forest method
+  trControl = train_control,    # Cross-validation settings
+  tuneLength = 5,               # Try 5 different hyperparameter values
+  metric = "ROC"                # Optimize based on ROC AUC
+)
+
+# View model summary
+print(rf_model)
+
+# Plot variable importance
+varImpPlot(rf_model$finalModel)
+
+```
+
+```{r}
+library(pROC)
+
+# Predict on test_data_corr
+rf_predictions <- predict(rf_model, test_data_cb)  # Class predictions
+rf_probs <- predict(rf_model, test_data_cb, type = "prob")  # Probabilities for ROC AUC
+
+# Compute confusion matrix
+rf_conf_matrix <- confusionMatrix(rf_predictions, test_data_cb$label)
+print(rf_conf_matrix)
+
+# Extract metrics from the confusion matrix
+rf_accuracy <- rf_conf_matrix$overall["Accuracy"]  # Accuracy
+rf_precision <- rf_conf_matrix$byClass["Pos Pred Value"]  # Precision
+rf_recall <- rf_conf_matrix$byClass["Sensitivity"]  # Recall
+
+# Compute F1 Score
+rf_f1 <- 2 * ((rf_precision * rf_recall) / (rf_precision + rf_recall))
+
+# Compute ROC AUC
+positive_class <- levels(test_data_cb$label)[2]  # Dynamically detect the positive class
+roc_curve <- roc(response = test_data_cb$label, predictor = rf_probs[, positive_class])
+rf_roc_auc <- auc(roc_curve)
+
+# Print metrics
+cat("Accuracy:", rf_accuracy, "\n")
+cat("F1 Score:", rf_f1, "\n")
+cat("ROC AUC:", rf_roc_auc, "\n")
+```
+
+
+
+
+
+```{r}
+features_to_drop_boruta
+```
+
+
+
+
+
+
+#Further Investigation
+
+
+```{r}
+# Export test_data to a CSV file
+write.csv(test_data_boruta, file = "test_data.csv", row.names = FALSE)
+
+# Export train_data to a CSV file
+write.csv(train_data_boruta, file = "train_data.csv", row.names = FALSE)
+
+```
+
+
+
+
+
+```{r}
+yenitest <- read.csv("yenitest.csv")
+
+
+```
+
+```{r}
+yenitest$label <- factor(yenitest$label, levels = c(0, 1), labels = c("NO", "YES"))
+
+```
+
+
+
+
+```{r}
+
+library(pROC)
+
+# Predict on test_data_corr
+rf_predictions <- predict(rf_model, yenitest)  # Class predictions
+rf_probs <- predict(rf_model, yenitest, type = "prob")  # Probabilities for ROC AUC
+
+# Compute confusion matrix
+rf_conf_matrix <- confusionMatrix(rf_predictions, yenitest$label)
+print(rf_conf_matrix)
+
+# Extract metrics from the confusion matrix
+rf_accuracy <- rf_conf_matrix$overall["Accuracy"]  # Accuracy
+rf_precision <- rf_conf_matrix$byClass["Pos Pred Value"]  # Precision
+rf_recall <- rf_conf_matrix$byClass["Sensitivity"]  # Recall
+
+# Compute F1 Score
+rf_f1 <- 2 * ((rf_precision * rf_recall) / (rf_precision + rf_recall))
+
+# Compute ROC AUC
+positive_class <- levels(yenitest$label)[2]  # Dynamically detect the positive class
+roc_curve <- roc(response = yenitest$label, predictor = rf_probs[, positive_class])
+rf_roc_auc <- auc(roc_curve)
+
+# Print metrics
+cat("Accuracy:", rf_accuracy, "\n")
+cat("F1 Score:", rf_f1, "\n")
+cat("ROC AUC:", rf_roc_auc, "\n")
+
+```
+
+
+
+
+
+
+
